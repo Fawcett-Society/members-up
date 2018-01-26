@@ -38,7 +38,33 @@
       (name 'target) (example "sandbox|standard|pro")
       (default "sandbox")
       (synopsis "Account for which to generate the payfile."))))
+   (subcommands
+    (list
+     (configuration
+      (name 'calculate-gains)
+      (alias 'calc)
+      (wanted '((keywords out target))))))
    (synopsis "Easily generate a Gocardless payfile reconciliation.")))
+
+;;;; Calculators
+
+(define (derive-new-amount sub)
+  (match (map (cute <> sub)
+              `(,subscription-interval_unit ,subscription-interval))
+    ;; - Annually -> 8800
+    ;;   + (yearly . 1)
+    ;;   + (monthly . 12)
+    ((or ("monthly" 12) ("yearly" 1)) 8800)
+    ;; - Bi-Annually -> 4400
+    ;;   + (monthly . 6)
+    ((or ("monthly" 6)) 4400)
+    ;; - Quarterly -> 2200
+    ;;   + (monthly . 3)
+    ((or ("monthly" 3)) 2200)
+    ;; - Monthly -> 800
+    ;;   + monthly 1
+    ((or ("monthly" 1)) 800)
+    (e (throw 'selector "unexpected interval_unit:" e))))
 
 ;;;; API Filter
 
@@ -115,23 +141,6 @@
                     nc-blckl))))
           candidates))
 
-(define (analysis subs)
-  (format #t "All Monthly, Annually? ~a ~%"
-          (every (lambda (sub)
-                   (and (= 1 (subscription-interval sub))
-                        (member (subscription-interval_unit sub)
-                                '("monthly" "yearly"))))
-                 subs))
-  (format #t "Those not Monthly, Annually: ~a ~%"
-          (filter-map (lambda (sub)
-                        (if (and (= 1 (subscription-interval sub))
-                                 (member (subscription-interval_unit sub)
-                                         '("monthly" "yearly")))
-                            #f
-                            (cons (subscription-interval_unit sub)
-                                  (subscription-interval sub))))
-                      subs)))
-
 ;;;; Candidate data structure
 
 (define (candidate customer subscription)
@@ -168,23 +177,6 @@
                mtable (subscription-links-mandate subscription))))
      subscription)))
 
-(define (full-candidate-report candidate)
-  ;; A candidate is an assoc consisting of
-  ;; '((customer . $cust) (subscription . $sub))
-  (let ((cust (assq-ref candidate 'customer))
-        (sub (assq-ref candidate 'subscription)))
-    (pretty-print
-     `((email . ,(customer-email cust))
-       (surname . ,(customer-family_name cust))
-       (firstname . ,(customer-given_name cust))
-       ;; FIXME: Needs to be set correctly for GC Context
-       (cust_urn . ,(access cust 'metadata 'URN))
-       ;; Standard has no URN
-       (interval . ,(subscription-interval sub))
-       (interval_unit . ,(subscription-interval_unit sub))
-       (amount . ,(subscription-amount sub))
-       (sub_id . ,(subscription-id sub))))))
-
 ;;;; CSV Utilities
 
 (define (scm->hash-table index-proc in)
@@ -201,97 +193,162 @@
   (list-ref lst (or (list-index (cute equal? <> key) header)
                     (throw 'tst key lst))))
 
+;;;; Reporters
+(define (analysis subs)
+  (format #t "All Monthly, Annually? ~a ~%"
+          (every (lambda (sub)
+                   (and (= 1 (subscription-interval sub))
+                        (member (subscription-interval_unit sub)
+                                '("monthly" "yearly"))))
+                 subs))
+  (format #t "Those not Monthly, Annually: ~a ~%"
+          (filter-map (lambda (sub)
+                        (if (and (= 1 (subscription-interval sub))
+                                 (member (subscription-interval_unit sub)
+                                         '("monthly" "yearly")))
+                            #f
+                            (cons (subscription-interval_unit sub)
+                                  (subscription-interval sub))))
+                      subs)))
+
+(define (full-candidate-report candidate)
+  ;; A candidate is an assoc consisting of
+  ;; '((customer . $cust) (subscription . $sub))
+  (let ((cust (assq-ref candidate 'customer))
+        (sub (assq-ref candidate 'subscription)))
+    (pretty-print
+     `((email . ,(customer-email cust))
+       (surname . ,(customer-family_name cust))
+       (firstname . ,(customer-given_name cust))
+       ;; FIXME: Needs to be set correctly for GC Context
+       (cust_urn . ,(access cust 'metadata 'URN))
+       ;; Standard has no URN
+       (interval . ,(subscription-interval sub))
+       (interval_unit . ,(subscription-interval_unit sub))
+       (amount . ,(subscription-amount sub))
+       (new_amount . ,(derive-new-amount sub))
+       (sub_id . ,(subscription-id sub))))))
+
 ;;;; Main
 
 (define (main cmdline)
   (let* ((options (getopt-config-auto cmdline %configuration))
-         (secret (with-input-from-file "./secrets.scm"
-                   (lambda _
-                     (assoc-ref (read) (option-ref options 'target)))))
-         (filename (string-append "membership+"
-                                  (string-upcase (option-ref options 'target))
-                                  "-"
-                                  (date->string (current-date) "~1_~H~M~S")
-                                  ".scm"))
-         ;; Generate Concessionary Blacklist Indexes
-         (conc-blckl (with-input-from-file (string-append (option-ref options 'blacklists)
-                                                          "Concessionary-Blacklist.csv")
+         (filename (string-append (option-ref options 'out) "Candidates-"
+                                  (option-ref options 'target) ".scm")))
+
+    (match (full-command options)
+      (("script")
+       (let ((secret (with-input-from-file "./secrets.scm"
                        (lambda _
-                         (let ((in (dsv->scm (current-input-port) #\, #:format 'rfc4180)))
-                           (list
-                            (scm->hash-table
-                             (cute csv-assoc-ref "Statement Text 1" <> (first in))
-                             (cdr in))
-                            (scm->hash-table
-                             (cute csv-assoc-ref "Statement Text 2" <> (first in))
-                             (cdr in))
-                            (scm->hash-table
-                             (cute csv-assoc-ref "Email" <> (first in))
-                             (cdr in))
-                            (scm->hash-table
-                             (cute csv-assoc-ref "Key Name" <> (first in))
-                             (cdr in)))))))
-         (nc-blckl (with-input-from-file (string-append (option-ref options 'blacklists)
-                                                        "Not-Contactable-blacklist.csv")
-                     (lambda _
-                       (let ((in (dsv->scm (current-input-port) #\, #:format 'rfc4180)))
-                         (list
-                          (scm->hash-table
-                           (cute csv-assoc-ref "Statement Text 1" <> (first in))
-                           (cdr in))
-                          (scm->hash-table
-                           (cute csv-assoc-ref "Statement Text 2" <> (first in))
-                           (cdr in))
-                          (scm->hash-table
-                           (cute csv-assoc-ref "Keyname" <> (first in))
-                           (cdr in))))))))
-    ;; Fetch our data pool
-    (parameterize ((access-token (string-append "Bearer " secret))
-                   (base-host (match (option-ref options 'target)
-                                ("sandbox" (base-host))
-                                (_ (build-uri 'https
-                                              #:host "api.gocardless.com"))))
-                   (debug? #f))
-      (format #t "Fetching Subscriptions, Mandates & Customers from API...")
-      (let ((subs (gc:map (lambda* (#:key limit after)
-                            (list-subscriptions #:limit limit #:after after
-                                                #:status "active"))
-                          subscriptions
-                          identity))
-            (mans (gc:map (lambda* (#:key limit after)
-                            (list-mandates #:limit limit #:after after))
-                          mandates
-                          identity))
-            (custs (gc:map (lambda* (#:key limit after)
-                             (list-customers #:limit limit #:after after))
-                           customers
-                           identity)))
-        (format #t "[DONE]~%")
-        ;; (analysis subs)                 ; Reveal interval info
-        ;; Basic Job Info
-        (format #t "Full count: ~a - Candidate count: ~a~%"
-                (length subs)
-                (length (filter selector subs)))
-        (let ((candidates (map (cute local-derive-candidate <> mans custs)
-                               (filter selector subs))))
-          (format
-           #t "Candidate count: ~a~%  Post-conc count: ~a~%Filtered count: ~a~%"
-           (length candidates)
-           ;; Filter against conc-blckls
-           (length (concessionary-filter conc-blckl candidates))
-           ;; Filter against conc-blckls & nc-blckl
-           (length (and=> (concessionary-filter conc-blckl candidates)
-                          (cute not-contactable-filter nc-blckl <>))))
-          (let ((out-name (string-append (option-ref options 'out)
-                                         "Candidates-"
-                                         (option-ref options 'target)
-                                         ".scm")))
-            (with-output-to-file out-name
-              (lambda _
-                (for-each full-candidate-report
-                          (and=> (concessionary-filter conc-blckl candidates)
-                                 (cute not-contactable-filter nc-blckl <>)))))
-            (format #t "Written to: ~a~%" out-name)))))))
+                         (assoc-ref (read) (option-ref options 'target)))))
+             ;; Generate Concessionary Blacklist Indexes
+             (conc-blckl (with-input-from-file (string-append (option-ref options 'blacklists)
+                                                              "Concessionary-Blacklist.csv")
+                           (lambda _
+                             (let ((in (dsv->scm (current-input-port) #\, #:format 'rfc4180)))
+                               (list
+                                (scm->hash-table
+                                 (cute csv-assoc-ref "Statement Text 1" <> (first in))
+                                 (cdr in))
+                                (scm->hash-table
+                                 (cute csv-assoc-ref "Statement Text 2" <> (first in))
+                                 (cdr in))
+                                (scm->hash-table
+                                 (cute csv-assoc-ref "Email" <> (first in))
+                                 (cdr in))
+                                (scm->hash-table
+                                 (cute csv-assoc-ref "Key Name" <> (first in))
+                                 (cdr in)))))))
+             (nc-blckl (with-input-from-file (string-append (option-ref options 'blacklists)
+                                                            "Not-Contactable-blacklist.csv")
+                         (lambda _
+                           (let ((in (dsv->scm (current-input-port) #\, #:format 'rfc4180)))
+                             (list
+                              (scm->hash-table
+                               (cute csv-assoc-ref "Statement Text 1" <> (first in))
+                               (cdr in))
+                              (scm->hash-table
+                               (cute csv-assoc-ref "Statement Text 2" <> (first in))
+                               (cdr in))
+                              (scm->hash-table
+                               (cute csv-assoc-ref "Keyname" <> (first in))
+                               (cdr in))))))))
+         ;; Fetch our data pool
+         (parameterize ((access-token (string-append "Bearer " secret))
+                        (base-host (match (option-ref options 'target)
+                                     ("sandbox" (base-host))
+                                     (_ (build-uri 'https
+                                                   #:host "api.gocardless.com"))))
+                        (debug? #f))
+           (format #t "Fetching Subscriptions, Mandates & Customers from API...")
+           (let ((subs (gc:map (lambda* (#:key limit after)
+                                 (list-subscriptions #:limit limit #:after after
+                                                     #:status "active"))
+                               subscriptions
+                               identity))
+                 (mans (gc:map (lambda* (#:key limit after)
+                                 (list-mandates #:limit limit #:after after))
+                               mandates
+                               identity))
+                 (custs (gc:map (lambda* (#:key limit after)
+                                  (list-customers #:limit limit #:after after))
+                                customers
+                                identity)))
+             (format #t "[DONE]~%")
+             ;; (analysis subs)                 ; Reveal interval info
+             ;; Basic Job Info
+             (format #t "Full count: ~a - Candidate count: ~a~%"
+                     (length subs)
+                     (length (filter selector subs)))
+             (let ((candidates (map (cute local-derive-candidate <> mans custs)
+                                    (filter selector subs))))
+               (format
+                #t "Candidate count: ~a~%  Post-conc count: ~a~%Filtered count: ~a~%"
+                (length candidates)
+                ;; Filter against conc-blckls
+                (length (concessionary-filter conc-blckl candidates))
+                ;; Filter against conc-blckls & nc-blckl
+                (length (and=> (concessionary-filter conc-blckl candidates)
+                               (cute not-contactable-filter nc-blckl <>))))
+               (with-output-to-file filename
+                 (lambda _
+                   (for-each full-candidate-report
+                             (and=> (concessionary-filter conc-blckl candidates)
+                                    (cute not-contactable-filter nc-blckl <>)))))
+               (format #t "Written to: ~a~%" filename))))))
+      (("script" "calculate-gains")
+       (with-input-from-file filename
+         (lambda _
+           (format (current-output-port)
+                   "We would gain ~a GBP over 1 year.~%"
+                   (/ (fold (lambda (entry total)
+                              (+ total
+                                 (* (- (assoc-ref entry 'new_amount)
+                                       (assoc-ref entry 'amount))
+                                    (match (list (assoc-ref entry 'interval_unit)
+                                                 (assoc-ref entry 'interval))
+                                      ;; - Annually -> * 1
+                                      ;;   + (yearly . 1)
+                                      ;;   + (monthly . 12)
+                                      ((or ("monthly" 12) ("yearly" 1)) 1)
+                                      ;; - Bi-Annually -> * 2
+                                      ;;   + (monthly . 6)
+                                      ((or ("monthly" 6)) 2)
+                                      ;; - Quarterly -> * 4
+                                      ;;   + (monthly . 3)
+                                      ((or ("monthly" 3)) 4)
+                                      ;; - Monthly -> * 12
+                                      ;;   + monthly 1
+                                      ((or ("monthly" 1)) 12)
+                                      (e (throw 'selector "unexpected interval_unit:"
+                                                e))))))
+                            0 (let lp ((content '())
+                                       (current (read)))
+                                (if (eof-object? current)
+                                    (reverse content)
+                                    (lp (cons current content)
+                                        (read)))))
+                      100.00))))))))
 
 ;; Sandbox!
 ;; (main '("script" "-t" "sandbox"))
