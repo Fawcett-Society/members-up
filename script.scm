@@ -237,6 +237,8 @@ performed."))))
        (firstname . ,(customer-given_name cust))
        ;; FIXME: Needs to be set correctly for GC Context
        (cust_urn . ,(access cust 'metadata 'URN))
+       (cust_statement_text_1
+        . ,(access cust 'metadata (string->symbol "Statement Text 1")))
        ;; Standard has no URN
        (interval . ,(subscription-interval sub))
        (interval_unit . ,(subscription-interval_unit sub))
@@ -274,6 +276,7 @@ performed."))))
                                 (scm->hash-table
                                  (cute csv-assoc-ref "Key Name" <> (first in))
                                  (cdr in)))))))
+             ;; Generate the non-contactable Blacklist Indexes
              (nc-blckl (with-input-from-file (string-append (option-ref options 'blacklists)
                                                             "Not-Contactable-blacklist.csv")
                          (lambda _
