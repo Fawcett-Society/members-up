@@ -107,54 +107,159 @@ performed."))))
      (< (subscription-amount sub) 800))
     (e (throw 'selector "unexpected interval_unit:" e))))
 
+(define (gc-clean-custom-reference urn)
+  ;; If we have trailing "/[0-9]", store it.
+  (if urn
+      (let* ((clean (string-split urn #\/))
+             (suffix (match clean
+                       ((a b) (string-append "/" b))
+                       (_ ""))))
+        ;; If our URN has leading 0s, strip them.
+        (string-append (match (string->number (first clean))
+                         (#f urn)
+                         (num (number->string num)))
+                       suffix))
+      #f))
+
 ;;;; Blacklist Filters
 (define (concessionary-filter conc-blckl candidates)
-  (filter (lambda (candidate)
-            (let ((cust (assq-ref candidate 'customer))
-                  (sub (assq-ref candidate 'subscription)))
-              ;; Custom URN
-              (not
-               (any (cute <> <>)
-                    `(,(lambda (stmnt-1-idx)
-                         (or (hash-ref stmnt-1-idx
-                                       (access cust 'metadata 'URN))
-                             (hash-ref stmnt-1-idx
-                                       (subscription-id sub))))
-                      ,(lambda (stmnt-2-idx)
-                         (or (hash-ref stmnt-2-idx
-                                       (access cust 'metadata 'URN))
-                             (hash-ref stmnt-2-idx
-                                       (subscription-id sub))))
-                      ,(lambda (email-idx)
-                         (hash-ref email-idx (customer-email cust)))
-                      ,(lambda (keyname-idx)
-                         (hash-ref keyname-idx
-                                   (customer-family_name cust))))
-                    conc-blckl))))
-          candidates))
+  (let ((stmnt-1-matches 0)
+        (stmnt-2-matches 0)
+        (email-matches 0)
+        (keyname-matches 0))
+    (let ((result
+           (filter (lambda (candidate)
+                     (let ((cust (assq-ref candidate 'customer))
+                           (sub (assq-ref candidate 'subscription)))
+                       ;; Custom URN
+                       (not
+                        (any (cute <> <>)
+                             `(,(lambda (stmnt-1-idx)
+                                 (if (or (hash-ref stmnt-1-idx
+                                                   (gc-clean-custom-reference
+                                                    (access cust 'metadata 'custom_reference)))
+                                         (hash-ref stmnt-1-idx
+                                                   (subscription-id sub)))
+                                     (begin
+                                       (set! stmnt-1-matches (1+ stmnt-1-matches))
+                                       #t)
+                                     #f))
+                              ,(lambda (stmnt-2-idx)
+                                 (if (or (hash-ref stmnt-2-idx
+                                                   (access cust 'metadata 'custom_reference))
+                                         (hash-ref stmnt-2-idx
+                                                   (subscription-id sub)))
+                                     (begin
+                                       (set! stmnt-2-matches (1+ stmnt-2-matches))
+                                       #t)
+                                     #f))
+                              ,(lambda (email-idx)
+                                 (if (hash-ref email-idx
+                                               (string-downcase
+                                                (customer-email cust)))
+                                     (begin
+                                       (set! email-matches (1+ email-matches))
+                                       #t)
+                                     #f))
+                              ,(lambda (keyname-idx)
+                                 (if (hash-ref keyname-idx
+                                               (string-append
+                                                (string-downcase
+                                                 (customer-given_name cust))
+                                                (string-downcase
+                                                 (customer-family_name cust))))
+                                     (begin
+                                       (set! keyname-matches (1+ keyname-matches))
+                                       #t)
+                                     #f)))
+                             conc-blckl))))
+                   candidates)))
+      (format #t "Statement 1 matches: ~a; Statement 2 matches: ~a; Email matches: ~a; Keyname matches: ~a.~%"
+              stmnt-1-matches stmnt-2-matches email-matches keyname-matches)
+      result)))
 
 (define (not-contactable-filter nc-blckl candidates)
-  (filter (lambda (candidate)
-            (let ((cust (assq-ref candidate 'customer))
-                  (sub (assq-ref candidate 'subscription)))
-              ;; Custom URN
-              (not
-               (any (cute <> <>)
-                    `(,(lambda (stmnt-1-idx)
-                         (or (hash-ref stmnt-1-idx
-                                       (access cust 'metadata 'URN))
-                             (hash-ref stmnt-1-idx
-                                       (subscription-id sub))))
-                      ,(lambda (stmnt-2-idx)
-                         (or (hash-ref stmnt-2-idx
-                                       (access cust 'metadata 'URN))
-                             (hash-ref stmnt-2-idx
-                                       (subscription-id sub))))
-                      ,(lambda (keyname-idx)
-                         (hash-ref keyname-idx
-                                   (customer-family_name cust))))
-                    nc-blckl))))
-          candidates))
+  (let ((stmnt-1-matches 0)
+        (stmnt-2-matches 0)
+        (keyname-matches 0))
+    (let ((result
+           (filter (lambda (candidate)
+                     (let ((cust (assq-ref candidate 'customer))
+                           (sub (assq-ref candidate 'subscription)))
+                       ;; Custom URN
+                       (not
+                        (any (cute <> <>)
+                             `(,(lambda (stmnt-1-idx)
+                                  (if (or (hash-ref stmnt-1-idx
+                                                    (gc-clean-custom-reference
+                                                     (access cust 'metadata 'custom_reference)))
+                                          (hash-ref stmnt-1-idx
+                                                    (subscription-id sub)))
+                                      (begin
+                                        (set! stmnt-1-matches (1+ stmnt-1-matches))
+                                        #t)
+                                      #f))
+                               ,(lambda (stmnt-2-idx)
+                                  (if (or (hash-ref stmnt-2-idx
+                                                    (gc-clean-custom-reference
+                                                     (access cust 'metadata 'custom_reference)))
+                                          (hash-ref stmnt-2-idx
+                                                    (subscription-id sub)))
+                                      (begin
+                                        (set! stmnt-2-matches (1+ stmnt-2-matches))
+                                        #t)
+                                      #f))
+                               ,(lambda (keyname-idx)
+                                  (if (hash-ref keyname-idx
+                                                (string-append
+                                                 (string-downcase
+                                                  (customer-given_name cust))
+                                                 (string-downcase
+                                                  (customer-family_name cust))))
+                                      (begin
+                                        (set! keyname-matches (1+ keyname-matches))
+                                        #t)
+                                      #f)))
+                             nc-blckl))))
+                   candidates)))
+      (format #t "Statement 1 matches: ~a; Statement 2 matches: ~a; Keyname matches: ~a.~%"
+              stmnt-1-matches stmnt-2-matches keyname-matches)
+      result)))
+
+(define (opt-out-filter oo-blckl candidates)
+  (let ((email-matches 0)
+        (keyname-matches 0))
+    (let ((result
+           (filter (lambda (candidate)
+                     (let ((cust (assq-ref candidate 'customer))
+                           (sub (assq-ref candidate 'subscription)))
+                       ;; Custom URN
+                       (not
+                        (any (cute <> <>)
+                             `(,(lambda (email-idx)
+                                  (if (hash-ref email-idx
+                                                (string-downcase
+                                                 (customer-email cust)))
+                                      (begin
+                                        (set! email-matches (1+ email-matches))
+                                        #t)
+                                      #f))
+                               ,(lambda (keyname-idx)
+                                  (if (hash-ref keyname-idx
+                                                (string-append
+                                                 (string-downcase
+                                                  (customer-given_name cust))
+                                                 (string-downcase
+                                                  (customer-family_name cust))))
+                                      (begin
+                                        (set! keyname-matches (1+ keyname-matches))
+                                        #t)
+                                      #f)))
+                             oo-blckl))))
+                   candidates)))
+      (format #t "Email matches: ~a; Keyname matches: ~a.~%"
+              email-matches keyname-matches)
+      result)))
 
 ;;;; Candidate data structure
 
