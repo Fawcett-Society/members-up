@@ -43,8 +43,23 @@
      (configuration
       (name 'calculate-gains)
       (alias 'calc)
-      (wanted '((keywords out target))))))
-   (synopsis "Easily generate a Gocardless payfile reconciliation.")))
+      (wanted '((keywords out target))))
+     (configuration
+      (name 'update!)
+      (alias 'upd!)
+      (wanted '((keywords out target)))
+      (keywords
+       (list
+        (switch
+         (name 'enact)
+         (default #f)
+         (test boolean?)
+         (synopsis "Actually perform the updates."))))
+      (description  "Perform the membership payment increase.
+
+Out in this context refers to the source file for the updates to be
+performed."))))
+   (synopsis "Tool to prep and carry out our membership dues increase.")))
 
 ;;;; Calculators
 
@@ -234,14 +249,14 @@
 (define (main cmdline)
   (let* ((options (getopt-config-auto cmdline %configuration))
          (filename (string-append (option-ref options 'out) "Candidates-"
-                                  (option-ref options 'target) ".scm")))
+                                  (option-ref options 'target) ".scm"))
+         (secret (with-input-from-file "./secrets.scm"
+                   (lambda _
+                     (assoc-ref (read) (option-ref options 'target))))))
 
     (match (full-command options)
       (("script")
-       (let ((secret (with-input-from-file "./secrets.scm"
-                       (lambda _
-                         (assoc-ref (read) (option-ref options 'target)))))
-             ;; Generate Concessionary Blacklist Indexes
+       (let (;; Generate Concessionary Blacklist Indexes
              (conc-blckl (with-input-from-file (string-append (option-ref options 'blacklists)
                                                               "Concessionary-Blacklist.csv")
                            (lambda _
@@ -316,6 +331,55 @@
                              (and=> (concessionary-filter conc-blckl candidates)
                                     (cute not-contactable-filter nc-blckl <>)))))
                (format #t "Written to: ~a~%" filename))))))
+      (("script" "update!")
+       (parameterize ((access-token (string-append "Bearer " secret))
+                       (base-host (match (option-ref options 'target)
+                                    ("sandbox" (base-host))
+                                    (_ (build-uri 'https
+                                                  #:host "api.gocardless.com"))))
+                       (debug? (not (option-ref options 'enact))))
+          (with-input-from-file filename
+            (lambda _
+              (let ((in (let lp ((content '())
+                                 (current (read)))
+                          (if (eof-object? current)
+                              (reverse content)
+                              (lp (cons current content)
+                                  (read))))))
+                (format (current-output-port) "Updating ~a subscriptions.~%"
+                        (length in))
+                (let lp ((done '())
+                         (errors '())
+                         (outstanding in))
+                  (if (null? outstanding)
+                      (begin
+                        (pretty-print (reverse done) (current-output-port))
+                        (pretty-print (reverse errors) (current-error-port))
+                        (format (current-output-port) "Done~%"))
+                      (let ((current (first outstanding))
+                            (rest (cdr outstanding)))
+                        (catch #t
+                          (lambda _
+                            (format (current-output-port) "Working on ~a (~a)..."
+                                    (assoc-ref current 'email)
+                                    (assoc-ref current 'sub_id))
+                            (let ((result (update-subscription
+                                           (assoc-ref current 'sub_id)
+                                           (assoc-ref current 'sub_id)
+                                           #:amount (assoc-ref current 'new_amount))))
+                              (format (current-output-port) "[DONE]~%")
+                              (lp (cons `((customer . ,current)
+                                          (response . ,result))
+                                        done)
+                                  errors
+                                  rest)))
+                          (lambda (key . args)
+                            (format (current-output-port) "[ERROR]~%")
+                            (lp done
+                                (cons `((customer . ,current)
+                                        (response . ,args))
+                                      errors)
+                                rest)))))))))))
       (("script" "calculate-gains")
        (with-input-from-file filename
          (lambda _
