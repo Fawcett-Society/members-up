@@ -343,7 +343,7 @@ performed."))))
        ;; FIXME: Needs to be set correctly for GC Context
        (cust_urn . ,(access cust 'metadata 'URN))
        (cust_statement_text_1
-        . ,(access cust 'metadata (string->symbol "Statement Text 1")))
+        . ,(access cust 'metadata 'custome_reference))
        ;; Standard has no URN
        (interval . ,(subscription-interval sub))
        (interval_unit . ,(subscription-interval_unit sub))
@@ -376,10 +376,17 @@ performed."))))
                                  (cute csv-assoc-ref "Statement Text 2" <> (first in))
                                  (cdr in))
                                 (scm->hash-table
-                                 (cute csv-assoc-ref "Email" <> (first in))
+                                 (compose string-downcase
+                                          (cute csv-assoc-ref "Email" <> (first in)))
                                  (cdr in))
                                 (scm->hash-table
-                                 (cute csv-assoc-ref "Key Name" <> (first in))
+                                 (lambda (row)
+                                   (string-append
+                                    (string-downcase
+                                     (csv-assoc-ref "First Name" row (first in)))
+                                    (string-downcase
+                                     (csv-assoc-ref "Key Name" row (first in)))))
+
                                  (cdr in)))))))
              ;; Generate the non-contactable Blacklist Indexes
              (nc-blckl (with-input-from-file (string-append (option-ref options 'blacklists)
@@ -394,7 +401,30 @@ performed."))))
                                (cute csv-assoc-ref "Statement Text 2" <> (first in))
                                (cdr in))
                               (scm->hash-table
-                               (cute csv-assoc-ref "Keyname" <> (first in))
+                               (lambda (row)
+                                 (string-append
+                                  (string-downcase
+                                   (csv-assoc-ref "First Name" row (first in)))
+                                  (string-downcase
+                                   (csv-assoc-ref "Keyname" row (first in)))))
+                               (cdr in)))))))
+             ;; Generate Opt Out Blacklist Indexes
+             (oo-blckl (with-input-from-file (string-append (option-ref options 'blacklists)
+                                                            "Follow-Up-Blacklist.csv")
+                         (lambda _
+                           (let ((in (dsv->scm (current-input-port) #\, #:format 'rfc4180)))
+                             (list
+                              (scm->hash-table
+                               (compose string-downcase
+                                        (cute csv-assoc-ref "Email" <> (first in)))
+                               (cdr in))
+                              (scm->hash-table
+                               (lambda (row)
+                                 (string-append
+                                  (string-downcase
+                                   (csv-assoc-ref "First Name" row (first in)))
+                                  (string-downcase
+                                   (csv-assoc-ref "Surname" row (first in)))))
                                (cdr in))))))))
          ;; Fetch our data pool
          (parameterize ((access-token (string-append "Bearer " secret))
@@ -423,71 +453,87 @@ performed."))))
              (format #t "Full count: ~a - Candidate count: ~a~%"
                      (length subs)
                      (length (filter selector subs)))
-             (let ((candidates (map (cute local-derive-candidate <> mans custs)
-                                    (filter selector subs))))
+             (let* ((candidates (map (cute local-derive-candidate <> mans custs)
+                                     (filter selector subs)))
+                    ;; Filter against conc-blckls
+                    (conc-filtered (concessionary-filter conc-blckl candidates))
+                    ;; Filter against conc-blckls & nc-blckl
+                    (nc-filtered (not-contactable-filter nc-blckl conc-filtered))
+                    ;; Filter against conc-blckls, nc-blckl & oo-blckl
+                    (oo-filtered (opt-out-filter oo-blckl nc-filtered)))
                (format
-                #t "Candidate count: ~a~%  Post-conc count: ~a~%Filtered count: ~a~%"
-                (length candidates)
-                ;; Filter against conc-blckls
-                (length (concessionary-filter conc-blckl candidates))
-                ;; Filter against conc-blckls & nc-blckl
-                (length (and=> (concessionary-filter conc-blckl candidates)
-                               (cute not-contactable-filter nc-blckl <>))))
+                #t "
+Candidate count: ~a
+  Post-conc count: ~a
+  Post-conc/Post-nc count: ~a
+Filtered count: ~a
+"
+                (length candidates) (length conc-filtered)
+                (length nc-filtered) (length oo-filtered))
                (with-output-to-file filename
                  (lambda _
                    (for-each full-candidate-report
-                             (and=> (concessionary-filter conc-blckl candidates)
-                                    (cute not-contactable-filter nc-blckl <>)))))
+                             oo-filtered)))
                (format #t "Written to: ~a~%" filename))))))
       (("script" "update!")
        (parameterize ((access-token (string-append "Bearer " secret))
-                       (base-host (match (option-ref options 'target)
-                                    ("sandbox" (base-host))
-                                    (_ (build-uri 'https
-                                                  #:host "api.gocardless.com"))))
-                       (debug? (not (option-ref options 'enact))))
-          (with-input-from-file filename
-            (lambda _
-              (let ((in (let lp ((content '())
-                                 (current (read)))
-                          (if (eof-object? current)
-                              (reverse content)
-                              (lp (cons current content)
-                                  (read))))))
-                (format (current-output-port) "Updating ~a subscriptions.~%"
-                        (length in))
-                (let lp ((done '())
-                         (errors '())
-                         (outstanding in))
-                  (if (null? outstanding)
-                      (begin
-                        (pretty-print (reverse done) (current-output-port))
-                        (pretty-print (reverse errors) (current-error-port))
-                        (format (current-output-port) "Done~%"))
-                      (let ((current (first outstanding))
-                            (rest (cdr outstanding)))
-                        (catch #t
-                          (lambda _
-                            (format (current-output-port) "Working on ~a (~a)..."
-                                    (assoc-ref current 'email)
-                                    (assoc-ref current 'sub_id))
-                            (let ((result (update-subscription
-                                           (assoc-ref current 'sub_id)
-                                           (assoc-ref current 'sub_id)
-                                           #:amount (assoc-ref current 'new_amount))))
-                              (format (current-output-port) "[DONE]~%")
-                              (lp (cons `((customer . ,current)
-                                          (response . ,result))
-                                        done)
-                                  errors
-                                  rest)))
-                          (lambda (key . args)
-                            (format (current-output-port) "[ERROR]~%")
-                            (lp done
-                                (cons `((customer . ,current)
-                                        (response . ,args))
-                                      errors)
-                                rest)))))))))))
+                      (base-host (match (option-ref options 'target)
+                                   ("sandbox" (base-host))
+                                   (_ (build-uri 'https
+                                                 #:host "api.gocardless.com"))))
+                      (debug? (not (option-ref options 'enact))))
+         (with-input-from-file filename
+           (lambda _
+             (let ((in (let lp ((content '())
+                                (current (read)))
+                         (if (eof-object? current)
+                             (reverse content)
+                             (lp (cons current content)
+                                 (read))))))
+               (format (current-output-port) "Updating ~a subscriptions.~%"
+                       (length in))
+               (let ((errors-file
+                      (open-file
+                       (string-append (option-ref options 'out)
+                                      "Errors-"
+                                      (option-ref options 'target)
+                                      ".scm")
+                       "a"))
+                     (done-file
+                      (open-file
+                       (string-append (option-ref options 'out)
+                                      "Done-"
+                                      (option-ref options 'target)
+                                      ".scm")
+                       "a")))
+                 (let lp ((outstanding in))
+                   (if (null? outstanding)
+                       (begin
+                         (close-port errors-file)
+                         (close-port done-file)
+                         (format (current-output-port) "Done~%"))
+                       (let ((current (first outstanding))
+                             (rest (cdr outstanding)))
+                         (catch #t
+                           (lambda _
+                             (format (current-output-port) "Working on ~a (~a)..."
+                                     (assoc-ref current 'email)
+                                     (assoc-ref current 'sub_id))
+                             (let ((result (update-subscription
+                                            (assoc-ref current 'sub_id)
+                                            (assoc-ref current 'sub_id)
+                                            #:amount (assoc-ref current 'new_amount))))
+                               (pretty-print `((customer . ,current)
+                                               (response . ,result))
+                                             done-file)
+                               (format (current-output-port) "[DONE]~%")
+                               (lp rest)))
+                           (lambda (key . args)
+                             (pretty-print `((customer . ,current)
+                                             (response . ,args))
+                                           errors-file)
+                             (format (current-output-port) "[ERROR]~%")
+                             (lp rest))))))))))))
       (("script" "calculate-gains")
        (with-input-from-file filename
          (lambda _
