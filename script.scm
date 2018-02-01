@@ -728,7 +728,9 @@ On the basis of this data, would gain ~a GBP over 1 year.~%"
 
     (match (full-command options)
       (("script")
-       (generate-source-files filename secret options))
+       (format #t "~%~%NOTE: Please ensure you have the latest blockfiles!~%~%")
+       (generate-source-files filename secret options)
+       (format #t "~%~%NOTE: Please ensure you have the latest blockfiles!~%~%"))
       (("script" "update!")
        (update-pro! filename secret options))
       (("script" "create!")
