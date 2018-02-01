@@ -342,39 +342,35 @@ performed."))))
 
 ;;;; Candidate data structure
 
-(define (candidate customer subscription)
+(define (candidate customer subscription mandate)
   `((customer . ,customer)
-    (subscription . ,subscription)))
+    (subscription . ,subscription)
+    (mandate . ,mandate)))
 
 ;; This one is slow because it makes ton of requests to the API!
 (define (derive-candidate subscription)
-  (candidate (customers
-              (get-customer
-               (mandate-links-customer
-                (mandates
-                 (get-mandate
-                  (subscription-links-mandate subscription))))))
-             subscription))
+  (let ((mandate (mandates
+                  (get-mandate (subscription-links-mandate subscription)))))
+    (candidate (customers (get-customer (mandate-links-customer mandate)))
+               subscription mandate)))
 
 ;; This one is fast but requires us to have collected all mandates and
 ;; customers
 (define (local-derive-candidate subscription mans custs)
-  (let ((mtable (let ((htable (make-hash-table)))
-                  (for-each (lambda (m)
-                              (hash-set! htable (mandate-id m) m))
-                            mans)
-                  htable))
-        (ctable (let ((htable (make-hash-table)))
-                  (for-each (lambda (c)
-                              (hash-set! htable (customer-id c) c))
-                            custs)
-                  htable)))
-    (candidate
-     (hash-ref
-      ctable (mandate-links-customer
-              (hash-ref
-               mtable (subscription-links-mandate subscription))))
-     subscription)))
+  (let* ((mtable (let ((htable (make-hash-table)))
+                   (for-each (lambda (m)
+                               (hash-set! htable (mandate-id m) m))
+                             mans)
+                   htable))
+         (ctable (let ((htable (make-hash-table)))
+                   (for-each (lambda (c)
+                               (hash-set! htable (customer-id c) c))
+                             custs)
+                   htable))
+         (mandate (hash-ref mtable
+                            (subscription-links-mandate subscription))))
+    (candidate (hash-ref ctable (mandate-links-customer mandate))
+               subscription mandate)))
 
 ;;;; CSV Utilities
 
@@ -414,7 +410,8 @@ performed."))))
   ;; A candidate is an assoc consisting of
   ;; '((customer . $cust) (subscription . $sub))
   (let ((cust (assq-ref candidate 'customer))
-        (sub (assq-ref candidate 'subscription)))
+        (sub (assq-ref candidate 'subscription))
+        (man (assq-ref candidate 'mandate)))
     (pretty-print
      `((email . ,(customer-email cust))
        (surname . ,(customer-family_name cust))
@@ -423,12 +420,14 @@ performed."))))
        (cust_urn . ,(access cust 'metadata 'URN))
        (cust_statement_text_1
         . ,(access cust 'metadata 'custome_reference))
-       ;; Standard has no URN
+       (metadata . ,(rsp->assoc (access cust 'metadata)))
        (interval . ,(subscription-interval sub))
        (interval_unit . ,(subscription-interval_unit sub))
+       (day_of_month . ,(subscription-day_of_month sub))
        (amount . ,(subscription-amount sub))
        (new_amount . ,(derive-new-amount sub))
-       (sub_id . ,(subscription-id sub))))))
+       (sub_id . ,(subscription-id sub))
+       (man_id . ,(mandate-id man))))))
 
 (define (generate-source-files filename secret options)
   (let (;; Generate Concessionary Blacklist Indexes
