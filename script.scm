@@ -597,7 +597,7 @@ Filtered count: ~a
                                        (assoc-ref current 'sub_id)
                                        #:amount (assoc-ref current 'new_amount))))
                           (pretty-print `((customer . ,current)
-                                          (response . ,result))
+                                          (response . ,(rsp->assoc result)))
                                         done-file)
                           (format (current-output-port) "[DONE]~%")
                           (lp rest)))
@@ -609,7 +609,75 @@ Filtered count: ~a
                         (lp rest))))))))))))
 
 (define (update-standard! filename secret options)
-  #t)
+  (parameterize ((access-token (string-append "Bearer " secret))
+                 (base-host (match (option-ref options 'target)
+                              ("sandbox" (base-host))
+                              (_ (build-uri 'https
+                                            #:host "api.gocardless.com"))))
+                 (debug? (not (option-ref options 'enact))))
+    (with-input-from-file filename
+      (lambda _
+        (let ((in (let lp ((content '())
+                           (current (read)))
+                    (if (eof-object? current)
+                        (reverse content)
+                        (lp (cons current content)
+                            (read)))))
+              (file (lambda (type)
+                      (string-append (option-ref options 'out) type "-"
+                                     (option-ref options 'target) ".scm"))))
+          (format (current-output-port) "Updating ~a subscriptions.~%"
+                  (length in))
+          (let ((errors-file (open-file (file "Errors") "a"))
+                (done-file (open-file (file "Done") "a")))
+            (let lp ((outstanding in))
+              ;; Non-functional logging is way safer in case of the
+              ;; program hanging for some reason: it writes at least some
+              ;; of the data.
+              ;; The first run logged nothing because we were collecting
+              ;; in memory, and it crashed before it ended.
+              (if (null? outstanding)
+                  (begin
+                    (close-port errors-file)
+                    (close-port done-file)
+                    (format (current-output-port) "Done~%"))
+                  (let ((current (first outstanding))
+                        (rest (cdr outstanding)))
+                    (catch #t
+                      (lambda _
+                        (format (current-output-port) "Working on ~a (~a)..."
+                                (assoc-ref current 'email)
+                                (assoc-ref current 'sub_id))
+                        (let* ((ia (format (current-output-port)
+                                           "Creating "))
+                               (crt (create-subscription
+                                     (assoc-ref current 'new_amount)
+                                     "GBP"
+                                     (assoc-ref current 'interval_unit)
+                                     (assoc-ref current 'man_id)
+                                     (assoc-ref current 'sub_id)
+                                     #:interval (assoc-ref current 'interval)
+                                     #:day_of_month (assoc-ref current 'day_of_month)
+                                     #:metadata `(("Statement Text 1"
+                                                   . ,(assoc-ref current 'sub_id)))))
+                               (l1 (pretty-print `((customer . ,current)
+                                                   (create-response . ,(rsp->assoc crt)))
+                                                 done-file))
+                               (ib (format (current-output-port)
+                                           "[DONE]; Deleting..."))
+                               (del (cancel-subscription
+                                     (assoc-ref current 'sub_id))))
+                          (pretty-print `((customer . ,current)
+                                          (delete-response . ,(rsp->assoc del)))
+                                        done-file)
+                          (format (current-output-port) "[DONE]~%")
+                          (lp rest)))
+                      (lambda (key . args)
+                        (pretty-print `((customer . ,current)
+                                        (response . ,args))
+                                      errors-file)
+                        (format (current-output-port) "[ERROR]~%")
+                        (lp rest))))))))))))
 
 (define (calculate-gains filename)
   (with-input-from-file filename
