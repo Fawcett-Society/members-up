@@ -162,7 +162,7 @@ performed."))))
 
 ;;;; API Filter
 
-(define (selector sub)
+(define (selector sub target)
   ;; Conditions for selection
   ;; Either:
   (match (map (cute <> sub)
@@ -171,19 +171,23 @@ performed."))))
     ;;   + (yearly . 1)
     ;;   + (monthly . 12)
     ((or ("monthly" 12) ("yearly" 1))
-     (< (subscription-amount sub) 8800))
+     (and (>= (subscription-amount sub) 6000)
+          (< (subscription-amount sub) 8800)))
     ;; - Bi-Annually && < x 4400
     ;;   + (monthly . 6)
     ((or ("monthly" 6))
-     (< (subscription-amount sub) 4400))
+     (and (>= (subscription-amount sub) 3000)
+          (< (subscription-amount sub) 4400)))
     ;; - Quarterly && < x 2200
     ;;   + (monthly . 3)
     ((or ("monthly" 3))
-     (< (subscription-amount sub) 2200))
+     (and (>= (subscription-amount sub) 1500)
+          (< (subscription-amount sub) 2200)))
     ;; - Monthly && < x 800
     ;;   + monthly 1
     ((or ("monthly" 1))
-     (< (subscription-amount sub) 800))
+     (and (>= (subscription-amount sub) 600)
+          (< (subscription-amount sub) 800)))
     (e (throw 'selector "unexpected interval_unit:" e))))
 
 (define (gc-clean-custom-reference urn)
@@ -519,9 +523,12 @@ performed."))))
         ;; Basic Job Info
         (format #t "Full count: ~a - Candidate count: ~a~%"
                 (length subs)
-                (length (filter selector subs)))
+                (length (filter (cut selector <> (option-ref options 'target))
+                                subs)))
         (let* ((candidates (map (cute local-derive-candidate <> mans custs)
-                                (filter selector subs)))
+                                (filter (cut selector <>
+                                             (option-ref options 'target))
+                                        subs)))
                ;; Filter against conc-blckls
                (conc-filtered (concessionary-filter conc-blckl candidates))
                ;; Filter against conc-blckls & nc-blckl
@@ -609,6 +616,7 @@ Filtered count: ~a
                         (lp rest))))))))))))
 
 (define (update-standard! filename secret options)
+  (throw 't "Debug: "(not (option-ref options 'enact)))
   (parameterize ((access-token (string-append "Bearer " secret))
                  (base-host (match (option-ref options 'target)
                               ("sandbox" (base-host))
