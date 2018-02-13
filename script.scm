@@ -73,6 +73,7 @@
   #:use-module (config licenses)
   #:use-module (config parser sexp)
   #:use-module (dsv)
+  #:use-module (json)
   #:use-module (gocardless)
   #:use-module (ice-9 pretty-print)
   #:use-module (ice-9 match)
@@ -108,6 +109,11 @@
       (name 'calculate-gains)
       (alias 'calc)
       (wanted '((keywords out target))))
+     (configuration
+      (name 'rit-report)
+      (alias 'rit)
+      (wanted '((keywords out target)))
+      (description  "Generate a report suitable for consumption by RIT script."))
      (configuration
       (name 'update!)
       (alias 'upd!)
@@ -164,6 +170,10 @@ performed."))))
 
 (define (selector sub target)
   ;; Conditions for selection
+  ;;
+  ;; In the standard context we can assume that any person paying less than
+  ;; 600/w or 6000/y is Concessionary. We want to ignore those.
+  ;;
   ;; Either:
   (match (map (cute <> sub)
               `(,subscription-interval_unit ,subscription-interval))
@@ -171,22 +181,26 @@ performed."))))
     ;;   + (yearly . 1)
     ;;   + (monthly . 12)
     ((or ("monthly" 12) ("yearly" 1))
-     (and (>= (subscription-amount sub) 6000)
+     (and (and (string=? target "standardng")
+               (>= (subscription-amount sub) 6000))
           (< (subscription-amount sub) 8800)))
     ;; - Bi-Annually && < x 4400
     ;;   + (monthly . 6)
     ((or ("monthly" 6))
-     (and (>= (subscription-amount sub) 3000)
+     (and (and (string=? target "standardng")
+               (>= (subscription-amount sub) 3000))
           (< (subscription-amount sub) 4400)))
     ;; - Quarterly && < x 2200
     ;;   + (monthly . 3)
     ((or ("monthly" 3))
-     (and (>= (subscription-amount sub) 1500)
+     (and (and (string=? target "standardng")
+               (>= (subscription-amount sub) 1500))
           (< (subscription-amount sub) 2200)))
     ;; - Monthly && < x 800
     ;;   + monthly 1
     ((or ("monthly" 1))
-     (and (>= (subscription-amount sub) 600)
+     (and (and (string=? target "standardng")
+               (>= (subscription-amount sub) 600))
           (< (subscription-amount sub) 800)))
     (e (throw 'selector "unexpected interval_unit:" e))))
 
@@ -687,6 +701,27 @@ Filtered count: ~a
                         (format (current-output-port) "[ERROR]~%")
                         (lp rest))))))))))))
 
+(define (rit-report filename secret options)
+  (parameterize ((access-token (string-append "Bearer " secret))
+                 (base-host (match (option-ref options 'target)
+                              ("sandbox" (base-host))
+                              (_ (build-uri 'https
+                                            #:host "api.gocardless.com")))))
+    (format #t "~a~%" filename)
+    (with-input-from-file filename
+      (lambda _
+        (let ((file (string-append (option-ref options 'out) "RIT-"
+                                   (option-ref options 'target) ".json")))
+          (let lp ((current (read))
+                   (result '()))
+            (if (eof-object? current)
+                (with-output-to-file file
+                  (lambda _ (scm->json (reverse result))))
+                (lp (read)
+                    (cons `((sub_id . ,(assoc-ref current 'sub_id))
+                            (new_amount . ,(assoc-ref current 'new_amount)))
+                          result)))))))))
+
 (define (calculate-gains filename)
   (with-input-from-file filename
     (lambda _
@@ -743,6 +778,8 @@ On the basis of this data, would gain ~a GBP over 1 year.~%"
        (update-pro! filename secret options))
       (("script" "create!")
        (update-standard! filename secret options))
+      (("script" "rit-report")
+       (rit-report filename secret options))
       (("script" "calculate-gains")
        (calculate-gains filename)))))
 
